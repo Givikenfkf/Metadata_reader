@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Metadata Compare — improved matching</title>
+<title>Metadata Compare — optimized</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
 <style>
   :root{--bg:#071827;--panel:#0b1220;--muted:#9aa6bf;--accent:#7dd3fc}
@@ -28,7 +28,7 @@
   <div class="wrap">
     <header>
       <div>
-        <h1>Metadata Compare — improved matching</h1>
+        <h1>Metadata Compare — optimized</h1>
         <div class="muted">Load two metadata files (original & modified). Output lists only Changed / Added / Removed strings.</div>
       </div>
     </header>
@@ -55,7 +55,7 @@
         <div style="margin-left:auto" class="small muted" id="status">No files loaded</div>
       </div>
 
-      <div class="note">Output: only changed strings. If too noisy, raise "Min string length" or lower the similarity threshold in the script below.</div>
+      <div class="note">Output: only changed strings. For large files, the page remains responsive.</div>
 
       <div style="margin-top:12px">
         <textarea id="out" placeholder="Output will appear here — only changed strings..." readonly></textarea>
@@ -64,76 +64,59 @@
   </div>
 
 <script>
-/* Helpers and extraction (ASCII + UTF-16LE) */
+/* ------------------- Helpers ------------------- */
 function isPrintable(b){ return b >= 32 && b <= 126; }
-function decodeAscii(bytes){ try { return new TextDecoder('latin1').decode(bytes); } catch(e){ return String.fromCharCode(...bytes); } }
-function decodeUtf16le(bytes){ try { return new TextDecoder('utf-16le').decode(bytes); } catch(e){ 
-  // fallback simple
-  let s = '';
-  for(let i=0;i+1<bytes.length;i+=2){ const c = bytes[i] | (bytes[i+1]<<8); s += String.fromCharCode(c); } return s;
-} }
+function decodeAscii(bytes){ return new TextDecoder('latin1').decode(bytes); }
+function decodeUtf16le(bytes){ 
+  if(bytes.length<2) return ''; 
+  try { return new TextDecoder('utf-16le').decode(bytes); } 
+  catch(e){ 
+    let s=''; for(let i=0;i+1<bytes.length;i+=2) s+=String.fromCharCode(bytes[i]|(bytes[i+1]<<8)); 
+    return s; 
+  }
+}
+function normalizeStr(s){ return s.replace(/\u0000/g,'').replace(/\r/g,'').replace(/\t/g,' ').replace(/\s+/g,' ').trim(); }
 
-function extractAsciiRuns(u8, minLen){
+/* ------------------- Extraction ------------------- */
+function extractAsciiRuns(u8,minLen){
   const runs=[]; let i=0;
   while(i<u8.length){
     if(isPrintable(u8[i])){
       const start=i; while(i<u8.length && isPrintable(u8[i])) i++;
-      const len=i-start; if(len>=minLen) runs.push({offset:start,length:len,encoding:'ASCII',text:normalizeStr(decodeAscii(u8.slice(start,i)))});
+      if(i-start>=minLen) runs.push({offset:start,length:i-start,encoding:'ASCII',text:normalizeStr(decodeAscii(u8.slice(start,i)))});
     } else i++;
   }
   return runs;
 }
+
 function extractUtf16leRuns(u8,minChars){
   const runs=[]; let i=0;
   while(i+1<u8.length){
     if(isPrintable(u8[i]) && u8[i+1]===0){
       const start=i; let chars=0;
       while(i+1<u8.length && isPrintable(u8[i]) && u8[i+1]===0){ chars++; i+=2; }
-      if(chars>=minChars){ const b=u8.slice(start,start+chars*2); runs.push({offset:start,length:chars*2,encoding:'UTF-16LE',text:normalizeStr(decodeUtf16le(b))}); }
+      if(chars>=minChars){ runs.push({offset:start,length:chars*2,encoding:'UTF-16LE',text:normalizeStr(decodeUtf16le(u8.slice(start,start+chars*2)))}) }
     } else i++;
   }
   return runs;
 }
 
 function uniqueByOffset(list){
-  list.sort((a,b)=>a.offset - b.offset || b.length - a.length);
+  list.sort((a,b)=>a.offset-b.offset || b.length-b.length);
   const out=[]; const seen=new Set();
   for(const it of list){ if(!seen.has(it.offset)){ out.push(it); seen.add(it.offset); } }
   return out;
 }
 
-function normalizeStr(s){
-  if(!s) return '';
-  // trim and collapse multiple spaces, remove trailing nulls
-  return s.replace(/\u0000/g,'').replace(/\r/g,'').replace(/\t/g,' ').split('\n').map(x=>x.replace(/\s+/g,' ').trim()).join('\n').trim();
+/* ------------------- Fast similarity ------------------- */
+function quickSim(a,b){
+  if(a===b) return 1;
+  if(a.includes(b) || b.includes(a)) return 0.9;
+  if(Math.abs(a.length-b.length)>10) return 0;
+  return 0.5;
 }
 
-/* Levenshtein distance (for similarity) */
-function lev(a,b){
-  if(a===b) return 0;
-  const n=a.length, m=b.length;
-  if(n===0) return m;
-  if(m===0) return n;
-  const dp = new Array(n+1);
-  for(let i=0;i<=n;i++){ dp[i]=new Array(m+1); dp[i][0]=i; }
-  for(let j=0;j<=m;j++) dp[0][j]=j;
-  for(let i=1;i<=n;i++){
-    for(let j=1;j<=m;j++){
-      const cost = a[i-1]===b[j-1] ? 0 : 1;
-      dp[i][j] = Math.min(dp[i-1][j]+1, dp[i][j-1]+1, dp[i-1][j-1]+cost);
-    }
-  }
-  return dp[n][m];
-}
-function similarity(a,b){
-  if(!a && !b) return 1;
-  const L = Math.max(a.length, b.length);
-  if(L===0) return 1;
-  const d = lev(a,b);
-  return 1 - (d / L);
-}
-
-/* File inputs + UI */
+/* ------------------- UI ------------------- */
 const fileOrig = document.getElementById('fileOrig');
 const fileMod  = document.getElementById('fileMod');
 const btnCompare = document.getElementById('btnCompare');
@@ -142,152 +125,39 @@ const out = document.getElementById('out');
 const status = document.getElementById('status');
 const btnDownload = document.getElementById('btnDownload');
 
-let origBuf = null;
-let modBuf = null;
-let lastResultText = '';
+let origBuf=null, modBuf=null, lastResultText='';
 
 function readFileInput(fileInput, cb){
-  const f = fileInput.files && fileInput.files[0];
+  const f=fileInput.files && fileInput.files[0];
   if(!f){ cb(null); return; }
-  f.arrayBuffer().then(ab => cb(new Uint8Array(ab))).catch(e => { console.error(e); cb(null); });
+  f.arrayBuffer().then(ab=>cb(new Uint8Array(ab))).catch(e=>{ console.error(e); cb(null); });
 }
 
 function loadBothBuffersThen(action){
-  readFileInput(fileOrig, (a)=>{
-    origBuf = a;
-    readFileInput(fileMod, (b)=>{
-      modBuf = b;
-      action();
-    });
-  });
+  readFileInput(fileOrig,a=>{ origBuf=a; readFileInput(fileMod,b=>{ modBuf=b; action(); }); });
 }
 
-btnCompare.addEventListener('click', ()=>loadBothBuffersThen(runCompare));
-btnClear.addEventListener('click', ()=>{
-  out.value=''; lastResultText=''; fileOrig.value=''; fileMod.value=''; origBuf=null; modBuf=null; status.textContent='Cleared';
-});
-btnDownload.addEventListener('click', ()=>{
+btnCompare.addEventListener('click',()=>loadBothBuffersThen(runCompare));
+btnClear.addEventListener('click',()=>{ out.value=''; lastResultText=''; fileOrig.value=''; fileMod.value=''; origBuf=null; modBuf=null; status.textContent='Cleared'; });
+btnDownload.addEventListener('click',()=>{
   if(!lastResultText){ alert('No output to download'); return; }
-  const blob = new Blob([lastResultText], {type:'text/plain'}); const url = URL.createObjectURL(blob);
-  const a = document.createElement('a'); a.href = url; a.download = 'changed_strings.txt'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  const blob = new Blob([lastResultText], {type:'text/plain'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href=url; a.download='changed_strings.txt';
+  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
 });
 
-/* Main compare logic with improved heuristics */
+/* ------------------- Main compare ------------------- */
 function runCompare(){
   out.value=''; lastResultText='';
   if(!origBuf || !modBuf){ status.textContent='Load both files'; return; }
-  const minLen = Math.max(4, parseInt(document.getElementById('minLen').value || '24',10));
+  const minLen = Math.max(4, parseInt(document.getElementById('minLen').value||'24',10));
   const minUtf = Math.floor(minLen/2);
   status.textContent='Extracting printable runs...';
 
-  let origSegments = uniqueByOffset(extractAsciiRuns(origBuf, minLen).concat(extractUtf16leRuns(origBuf, minUtf)));
-  let modSegments  = uniqueByOffset(extractAsciiRuns(modBuf, minLen).concat(extractUtf16leRuns(modBuf, minUtf)));
-
+  let origSegments = uniqueByOffset(extractAsciiRuns(origBuf,minLen).concat(extractUtf16leRuns(origBuf,minUtf)));
+  let modSegments  = uniqueByOffset(extractAsciiRuns(modBuf,minLen).concat(extractUtf16leRuns(modBuf,minUtf)));
   status.textContent = `Found ${origSegments.length} orig runs, ${modSegments.length} mod runs — matching...`;
 
-  // quick map for exact offset+encoding
-  const modMap = new Map();
-  for(const m of modSegments) modMap.set(`${m.offset}:${m.encoding}`, m);
-
-  const matchedModKeys = new Set();
-  const matchedOrigKeys = new Set();
-  const changes = [];
-  const WINDOW = 64;            // search window in bytes
-  const SIM_THRESH = 0.50;      // similarity threshold to consider as 'Changed' (0..1)
-
-  // 1) exact offset+encoding matches: if identical text -> ignore; if different -> Changed
-  for(const o of origSegments){
-    const k = `${o.offset}:${o.encoding}`;
-    if(modMap.has(k)){
-      const m = modMap.get(k);
-      matchedModKeys.add(k);
-      matchedOrigKeys.add(k);
-      if(o.text !== m.text){
-        changes.push({type:'Changed', orig:o, mod:m, sim: similarity(o.text, m.text)});
-      }
-    }
-  }
-
-  // 2) for unmatched orig segments, try best candidate in mod (windowed search) using similarity
-  for(const o of origSegments){
-    const kO = `${o.offset}:${o.encoding}`;
-    if(matchedOrigKeys.has(kO)) continue; // already handled
-    let best = null;
-    for(const m of modSegments){
-      if(matchedModKeys.has(`${m.offset}:${m.encoding}`)) continue; // already paired
-      if(m.encoding !== o.encoding) continue;
-      if(Math.abs(m.offset - o.offset) > WINDOW) continue;
-      const sim = similarity(o.text, m.text);
-      if(!best || sim > best.sim) best = {seg:m, sim};
-    }
-    if(best && best.sim >= SIM_THRESH){
-      // treat as Changed (moved/shifted)
-      const m = best.seg;
-      matchedModKeys.add(`${m.offset}:${m.encoding}`);
-      matchedOrigKeys.add(kO);
-      changes.push({type:'Changed', orig:o, mod:m, sim: best.sim});
-    } else {
-      // no decent match -> Removed
-      changes.push({type:'Removed', orig:o, mod:null});
-    }
-  }
-
-  // 3) any mod segments not matched are Added
-  for(const m of modSegments){
-    const kM = `${m.offset}:${m.encoding}`;
-    if(matchedModKeys.has(kM)) continue;
-    // try tiny sanity check: maybe there's an orig nearby but we skipped due to earlier exact-match logic (avoid duplicates)
-    let near = false;
-    for(const o of origSegments){
-      if(o.encoding !== m.encoding) continue;
-      if(Math.abs(o.offset - m.offset) <= WINDOW){
-        const sim = similarity(o.text, m.text);
-        if(sim >= SIM_THRESH){ near = true; break; }
-      }
-    }
-    if(!near){
-      changes.push({type:'Added', orig:null, mod:m});
-    }
-  }
-
-  // Filter out any items that were exact matches (shouldn't be included but double-check)
-  const filtered = changes.filter(c=>{
-    if(c.type === 'Changed' && c.orig && c.mod && c.orig.text === c.mod.text) return false;
-    return true;
-  });
-
-  if(filtered.length === 0){
-    out.value = ''; status.textContent = 'No changed strings (after improved matching)';
-    lastResultText = '';
-    return;
-  }
-
-  // Build minimal output
-  filtered.sort((a,b)=>{
-    const ao = a.orig ? a.orig.offset : (a.mod ? a.mod.offset : 1e9);
-    const bo = b.orig ? b.orig.offset : (b.mod ? b.mod.offset : 1e9);
-    return ao - bo;
-  });
-
-  let outText = '';
-  for(const c of filtered){
-    if(c.type === 'Changed'){
-      outText += `[Changed] ${c.orig.encoding} 0x${c.orig.offset.toString(16)} -> 0x${c.mod.offset.toString(16)} (sim ${(c.sim||0).toFixed(2)})\n`;
-      outText += `Original:\n${c.orig.text}\n`;
-      outText += `Modified:\n${c.mod.text}\n\n`;
-    } else if(c.type === 'Removed'){
-      outText += `[Removed] ${c.orig.encoding} 0x${c.orig.offset.toString(16)}\n`;
-      outText += `Original:\n${c.orig.text}\n\n`;
-    } else if(c.type === 'Added'){
-      outText += `[Added] ${c.mod.encoding} 0x${c.mod.offset.toString(16)}\n`;
-      outText += `Modified:\n${c.mod.text}\n\n`;
-    }
-  }
-
-  out.value = outText.trim();
-  lastResultText = out.value;
-  status.textContent = `Done — ${filtered.length} changed/added/removed strings`;
-}
-</script>
-</body>
-</html>
+  const WINDOW = 64, SIM_THRESH = 0.5;
+  const modM
